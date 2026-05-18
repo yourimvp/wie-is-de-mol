@@ -1092,12 +1092,6 @@ function TeamQuestionsPanel({ teamNumber, questions, players, onSave }) {
   const [dirty, setDirty] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
-  // Sync when parent questions change (e.g. after reload)
-  useEffect(() => {
-    setLocalQuestions(questions);
-    setDirty(false);
-  }, [questions]);
-
   const updateQuestion = (i, q) => {
     const next = [...localQuestions];
     next[i] = q;
