@@ -31,7 +31,9 @@ const DEFAULT_GAME = {
   revealedAt: null,
   teamRevealedAt: null,
   pin: DEFAULT_PIN,
-  questions: DEFAULT_QUESTIONS,
+  questions: DEFAULT_QUESTIONS,       // legacy fallback
+  questionsTeam1: DEFAULT_QUESTIONS,  // vragen + juiste antwoorden voor team 1
+  questionsTeam2: DEFAULT_QUESTIONS,  // vragen + juiste antwoorden voor team 2
   submittedBy: [],
 };
 
@@ -524,14 +526,22 @@ function isCorrect(question, answer) {
   return answer === question.correctAnswer;
 }
 
+function getQuestionsForPlayer(game, playerName) {
+  const team = game.teams?.[playerName];
+  if (team === 1) return game.questionsTeam1 || game.questions;
+  if (team === 2) return game.questionsTeam2 || game.questions;
+  return game.questions; // fallback for players without a team
+}
+
 function calculateScore(answers, questions) {
   return questions.reduce((sum, q) => sum + (isCorrect(q, answers?.[q.id]) ? 1 : 0), 0);
 }
 
-function determineWinner(answersList, questions, moleName) {
+function determineWinner(answersList, game, moleName) {
   let best = null;
   for (const a of answersList) {
     if (a.name === moleName) continue;
+    const questions = getQuestionsForPlayer(game, a.name);
     const score = calculateScore(a.answers, questions);
     if (!best || score > best.score || (score === best.score && a.at < best.at)) {
       best = { name: a.name, score, at: a.at };
@@ -593,8 +603,9 @@ function QuizForm({ game, name, onSubmit, onBack }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  const questions = getQuestionsForPlayer(game, name);
   const setAns = (qid, val) => setAnswers((a) => ({ ...a, [qid]: val }));
-  const allAnswered = game.questions.every((q) => answers[q.id] && String(answers[q.id]).trim().length > 0);
+  const allAnswered = questions.every((q) => answers[q.id] && String(answers[q.id]).trim().length > 0);
 
   const handleSubmit = async () => {
     if (!allAnswered) { setError('Beantwoord alle vragen.'); return; }
@@ -627,9 +638,9 @@ function QuizForm({ game, name, onSubmit, onBack }) {
       {error && <div className="widm-error">{error}</div>}
 
       <div className="widm-card">
-        {game.questions.map((q, i) => (
+        {questions.map((q, i) => (
           <div key={q.id} className="widm-question">
-            <div className="widm-question-num">Vraag {i + 1} van {game.questions.length}</div>
+            <div className="widm-question-num">Vraag {i + 1} van {questions.length}</div>
             <div className="widm-question-text">{q.text}</div>
             {q.type === 'text' && (
               <input
@@ -1075,62 +1086,63 @@ function QuestionEditor({ question, index, players, onChange, onDelete }) {
 // ============================================================
 // ADMIN: TABS
 // ============================================================
-function QuestionsTab({ game, refresh }) {
-  const [questions, setQuestions] = useState(game.questions);
+// Shared question editor panel used by both team tabs
+function TeamQuestionsPanel({ teamNumber, questions, players, onSave }) {
+  const [localQuestions, setLocalQuestions] = useState(questions);
   const [dirty, setDirty] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
+  // Sync when parent questions change (e.g. after reload)
+  useEffect(() => {
+    setLocalQuestions(questions);
+    setDirty(false);
+  }, [questions]);
+
   const updateQuestion = (i, q) => {
-    const next = [...questions];
+    const next = [...localQuestions];
     next[i] = q;
-    setQuestions(next);
+    setLocalQuestions(next);
     setDirty(true);
   };
 
   const removeQuestion = (i) => {
     if (!confirm('Vraag verwijderen?')) return;
-    setQuestions(questions.filter((_, idx) => idx !== i));
+    setLocalQuestions(localQuestions.filter((_, idx) => idx !== i));
     setDirty(true);
   };
 
   const addQuestion = () => {
     const id = 'q' + Date.now();
-    setQuestions([...questions, { id, text: '', type: 'text', correctAnswer: '' }]);
+    setLocalQuestions([...localQuestions, { id, text: '', type: 'text', correctAnswer: '' }]);
     setDirty(true);
   };
 
   const save = async () => {
-    const fresh = await loadGame();
-    fresh.questions = questions;
-    await saveGame(fresh);
+    await onSave(localQuestions);
     setDirty(false);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 2000);
-    refresh();
   };
 
-  const incomplete = questions.filter((q) => !q.text.trim() || !q.correctAnswer);
+  const incomplete = localQuestions.filter((q) => !q.text.trim() || !q.correctAnswer);
 
   return (
-    <div className="widm-card">
-      <div className="widm-label">Vragen ({questions.length})</div>
+    <div>
       <div className="widm-helper" style={{ marginBottom: 16 }}>
-        Stel hier de quizvragen in. Het juiste antwoord telt mee voor de score van elke speler. De winnaar wordt automatisch bepaald op basis van het aantal goede antwoorden (de Mol kan niet winnen).
+        Zelfde vragen, maar vul hier het juiste antwoord in voor <strong>Team {teamNumber}</strong> — gebaseerd op de Mol van dit team.
       </div>
 
-      {savedFlash && <div className="widm-success">✓ Vragen opgeslagen.</div>}
+      {savedFlash && <div className="widm-success">✓ Vragen Team {teamNumber} opgeslagen.</div>}
       {incomplete.length > 0 && (
-        <div className="widm-info">
-          {incomplete.length} vraag/vragen mist nog tekst of een juist antwoord.
-        </div>
+        <div className="widm-info">{incomplete.length} vraag/vragen mist nog tekst of juist antwoord.</div>
       )}
 
-      {questions.map((q, i) => (
+      {localQuestions.map((q, i) => (
         <QuestionEditor
           key={q.id}
           question={q}
           index={i}
-          players={game.players}
+          players={players}
           onChange={(nq) => updateQuestion(i, nq)}
           onDelete={() => removeQuestion(i)}
         />
@@ -1141,26 +1153,94 @@ function QuestionsTab({ game, refresh }) {
       </button>
 
       <button className="widm-btn" onClick={save} disabled={!dirty}>
-        {dirty ? 'Wijzigingen opslaan' : 'Opgeslagen'}
+        {dirty ? `Wijzigingen opslaan (Team ${teamNumber})` : 'Opgeslagen'}
       </button>
     </div>
   );
 }
 
+function QuestionsTab({ game, refresh }) {
+  const [teamTab, setTeamTab] = useState(1);
+
+  const saveTeam = async (team, questions) => {
+    const fresh = await loadGame();
+    if (team === 1) fresh.questionsTeam1 = questions;
+    else fresh.questionsTeam2 = questions;
+    await saveGame(fresh);
+    refresh();
+  };
+
+  return (
+    <div className="widm-card">
+      <div className="widm-label">Vragen per team</div>
+
+      {/* Team sub-tabs */}
+      <div style={{ display: 'flex', gap: 0, marginBottom: 20, borderBottom: '1px solid var(--line)' }}>
+        <button
+          onClick={() => setTeamTab(1)}
+          style={{
+            flex: 1, padding: '10px', background: 'transparent', border: 'none',
+            borderBottom: teamTab === 1 ? '2px solid #3b82f6' : '2px solid transparent',
+            color: teamTab === 1 ? '#93c5fd' : 'var(--muted)',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+            letterSpacing: '0.15em', textTransform: 'uppercase', cursor: 'pointer',
+          }}
+        >
+          Team 1 ({(game.questionsTeam1 || game.questions).length} vragen)
+        </button>
+        <button
+          onClick={() => setTeamTab(2)}
+          style={{
+            flex: 1, padding: '10px', background: 'transparent', border: 'none',
+            borderBottom: teamTab === 2 ? '2px solid #eab308' : '2px solid transparent',
+            color: teamTab === 2 ? '#fde68a' : 'var(--muted)',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 700,
+            letterSpacing: '0.15em', textTransform: 'uppercase', cursor: 'pointer',
+          }}
+        >
+          Team 2 ({(game.questionsTeam2 || game.questions).length} vragen)
+        </button>
+      </div>
+
+      {teamTab === 1 && (
+        <TeamQuestionsPanel
+          key="team1"
+          teamNumber={1}
+          questions={game.questionsTeam1 || game.questions}
+          players={game.players}
+          onSave={(q) => saveTeam(1, q)}
+        />
+      )}
+      {teamTab === 2 && (
+        <TeamQuestionsPanel
+          key="team2"
+          teamNumber={2}
+          questions={game.questionsTeam2 || game.questions}
+          players={game.players}
+          onSave={(q) => saveTeam(2, q)}
+        />
+      )}
+    </div>
+  );
+}
+
 function ScoresTab({ game, answers }) {
-  const scored = answers.map((a) => ({
-    name: a.name,
-    score: calculateScore(a.answers, game.questions),
-    at: a.at,
-    answers: a.answers,
-  }));
+  const scored = answers.map((a) => {
+    const questions = getQuestionsForPlayer(game, a.name);
+    return {
+      name: a.name,
+      score: calculateScore(a.answers, questions),
+      total: questions.length,
+      at: a.at,
+      answers: a.answers,
+      questions,
+    };
+  });
 
   scored.sort((a, b) => b.score - a.score || a.at - b.at);
 
   const eligibleForWin = scored.filter((s) => s.name !== game.mole);
   const leader = eligibleForWin[0];
-
-  const total = game.questions.length;
 
   return (
     <div className="widm-card">
@@ -1174,7 +1254,7 @@ function ScoresTab({ game, answers }) {
         <>
           {leader && (
             <div className="widm-info" style={{ marginBottom: 16 }}>
-              Huidige koploper: <strong>{leader.name}</strong> met {leader.score} / {total} goed
+              Huidige koploper: <strong>{leader.name}</strong> met {leader.score} / {leader.total} goed
               {eligibleForWin.filter((s) => s.score === leader.score).length > 1 && ' (gelijkspel — vroegste inzending wint)'}
             </div>
           )}
@@ -1183,16 +1263,19 @@ function ScoresTab({ game, answers }) {
             const isMole = s.name === game.mole;
             const isLeader = !isMole && leader && s.name === leader.name;
             const rank = isMole ? '—' : (eligibleForWin.findIndex((x) => x.name === s.name) + 1);
+            const playerTeam = game.teams?.[s.name];
             return (
               <div key={s.name} className={`widm-score-row ${isLeader ? 'is-leader' : ''} ${isMole ? 'is-mole-row' : ''}`}>
                 <div className="widm-score-rank">{rank}</div>
                 <div className="widm-score-name">
                   {s.name}
+                  {playerTeam === 1 && <span className="widm-team-badge widm-team-badge-1">T1</span>}
+                  {playerTeam === 2 && <span className="widm-team-badge widm-team-badge-2">T2</span>}
                   {isMole && <span className="widm-tag widm-tag-mole">Mol</span>}
                   {isLeader && <span className="widm-tag widm-tag-winner">Koploper</span>}
                 </div>
                 <div className="widm-score-value">
-                  {s.score}<span className="widm-score-value-total"> / {total}</span>
+                  {s.score}<span className="widm-score-value-total"> / {s.total}</span>
                 </div>
               </div>
             );
@@ -1206,9 +1289,9 @@ function ScoresTab({ game, answers }) {
               {scored.map((s) => (
                 <div key={s.name} style={{ marginBottom: 16, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
                   <div className="display" style={{ fontSize: 18, color: 'var(--jade)', marginBottom: 6 }}>
-                    {s.name} — {s.score}/{total}
+                    {s.name} — {s.score}/{s.total}
                   </div>
-                  {game.questions.map((q) => {
+                  {s.questions.map((q) => {
                     const ans = s.answers[q.id];
                     const correct = isCorrect(q, ans);
                     return (
@@ -1364,12 +1447,13 @@ function RevealTab({ game, answers, refresh }) {
   };
 
   const revealIndividual = async () => {
-    const winner = determineWinner(answers, game.questions, game.mole);
+    const winner = determineWinner(answers, game, game.mole);
     const scores = {};
     for (const a of answers) {
+      const questions = getQuestionsForPlayer(game, a.name);
       scores[a.name] = {
-        score: calculateScore(a.answers, game.questions),
-        total: game.questions.length,
+        score: calculateScore(a.answers, questions),
+        total: questions.length,
         at: a.at,
       };
     }
@@ -1435,7 +1519,7 @@ function RevealTab({ game, answers, refresh }) {
     flash('Volledige reset.');
   };
 
-  const winnerPreview = determineWinner(answers, game.questions, game.mole);
+  const winnerPreview = determineWinner(answers, game, game.mole);
   const incompleteQuestions = game.questions.filter((q) => !q.correctAnswer);
   const isIndividualRevealed = game.phase === 'revealed-individual' || game.phase === 'revealed-team';
   const isTeamRevealed = game.phase === 'revealed-team';
@@ -1650,7 +1734,8 @@ function AdminPanel({ game, refresh, onExit }) {
 
   const scoresMap = {};
   for (const a of answers) {
-    scoresMap[a.name] = calculateScore(a.answers, game.questions);
+    const questions = getQuestionsForPlayer(game, a.name);
+    scoresMap[a.name] = calculateScore(a.answers, questions);
   }
 
   return (
